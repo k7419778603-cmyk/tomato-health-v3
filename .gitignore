@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output (Vercel will run `npm run build` on the server)
+dist/
+
+# Vite
+.vite/
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+
+# Logs & debug
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor / IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# TypeScript
+*.tsbuildinfo
