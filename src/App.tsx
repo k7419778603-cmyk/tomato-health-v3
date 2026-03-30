@@ -11,9 +11,9 @@ import { safeRandomId } from "./utils/id";
 const navItems: Array<{ key: NavKey; label: string }> = [
   { key: "home", label: "首页" },
   { key: "nutrition", label: "饮食计划" },
-  { key: "news", label: "资讯/新闻" },
+  { key: "news", label: "饮食资讯" },
   { key: "knowledge", label: "知识科普" },
-  { key: "settings", label: "设置" },
+  { key: "contact", label: "联系我们" },
 ];
 
 const chronicTypes: Profile["chronicType"][] = [
@@ -470,10 +470,34 @@ const initialWeekPlan: DayPlan[] = initialWeekPlanRaw.map((day) => {
 
 const quickQuestions = ["今天外出聚餐，怎么控制盐油", "今天加班，晚餐怎么简化", "我不吃辣，能不能换一道", "今晚不想吃鱼，能换什么"];
 const aiReplyMap: Record<string, string> = {
-  "今晚不想吃鱼，能换什么": "可换清炖鸡胸或豆腐虾仁，盐量维持低档。",
-  "今天外出聚餐，饮食怎么调整": "优先蒸煮，主食减量 1/4，饮料只选无糖。",
-  "我不吃辣，能不能换一版": "已切到不辣版，仍保留低盐少油结构。",
-  "今天加班，晚餐怎么简化": "今晚用一汤一菜一蛋白，20 分钟内可完成。",
+  "今晚不想吃鱼，能换什么": "已替换今日晚餐鱼类主菜，仍保持低盐少油结构。",
+  "今天外出聚餐，怎么控制盐油": "已调整今日午、晚餐为更易控油盐的搭配；聚餐时优先清淡做法与少酱。",
+  "我不吃辣，能不能换一道": "已轮换替换菜，避免重辣调味，结构仍为低盐少油。",
+  "今天加班，晚餐怎么简化": "已将今日晚餐切换为更简单、省时做法，油盐仍按低档控制。",
+};
+
+const weekdayLabels = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
+
+const getTodayPlanIndex = (plan: DayPlan[]) => {
+  const label = weekdayLabels[new Date().getDay()];
+  const idx = plan.findIndex((d) => d.day === label);
+  return idx >= 0 ? idx : 0;
+};
+
+const mutateMealInDay = (day: DayPlan, mealKey: DishMealType, mode: "replace" | "dislike" | "simple"): DayPlan => {
+  const meal = day[mealKey];
+  const options = meal.alternatives;
+
+  const selectedDishId =
+    mode === "replace"
+      ? options[0] ?? meal.dishId
+      : mode === "dislike"
+        ? options[1] ?? options[0] ?? meal.dishId
+        : options.find((id) => dishById[id]?.difficulty === "easy") ?? options[0] ?? meal.dishId;
+
+  const rotated = options.length > 1 ? [...options.slice(1), options[0]] : options;
+
+  return { ...day, [mealKey]: { ...meal, dishId: selectedDishId, alternatives: rotated } };
 };
 
 const mealUiMap: Record<DishMealType, { label: string; icon: string; headBg: string; cardBg: string; border: string }> = {
@@ -506,6 +530,7 @@ function App() {
   const [entered, setEntered] = useState(false);
   const [activeNav, setActiveNav] = useState<NavKey>("home");
   const [selectedChronic, setSelectedChronic] = useState<Profile["chronicType"]>(activeProfile.chronicType);
+  const [focusChronic, setFocusChronic] = useState<Profile["chronicType"]>(activeProfile.chronicType);
   const [nickname, setNickname] = useState(activeProfile.name);
   const [gender, setGender] = useState<Profile["gender"]>(activeProfile.gender);
   const [age, setAge] = useState(activeProfile.age);
@@ -516,6 +541,7 @@ function App() {
   const [weekPlan, setWeekPlan] = useState(initialWeekPlan);
   const [aiInput, setAiInput] = useState("");
   const [aiReply, setAiReply] = useState("先稳住低盐结构，再做菜品微调。");
+  const [aiIsLoading, setAiIsLoading] = useState(false);
   const [recipeDetail, setRecipeDetail] = useState<null | {
     dishId: string;
     mealType: DishMealType;
@@ -535,7 +561,7 @@ function App() {
   const [addIngredientNotes, setAddIngredientNotes] = useState("");
   const [addIngredientNameError, setAddIngredientNameError] = useState(false);
 
-  const currentFocus = chronicFocus[selectedChronic];
+  const currentFocus = chronicFocus[focusChronic];
   const selectedNews = newsItems.find((n) => n.id === selectedNewsId) ?? null;
   const selectedIngredient = knowledgeIngredients.find((i) => i.id === selectedIngredientId) ?? null;
 
@@ -600,46 +626,110 @@ function App() {
       goal: "本周稳住三餐结构并减少偏离",
       statusTags: ["慢病饮食", "可执行计划", "每日回执"],
     });
+    // 保存后收起档案编辑区，避免用户误以为还在继续填写
+    setShowProfileEditor(false);
     setIsThinking(true);
     setCanOpenPlan(false);
     window.setTimeout(() => {
+      // 本周饮食重点以“已保存档案”为准，避免编辑中的临时选择立刻影响重点区。
+      setFocusChronic(selectedChronic);
       setIsThinking(false);
       setCanOpenPlan(true);
-    }, 1600);
+    }, 700);
   };
 
   const askAi = (question: string) => {
     const q = question.trim();
-    if (!q) return;
-    setAiReply(aiReplyMap[q] ?? "已改成更简单菜品，同时保持低盐少油。");
+    if (!q) {
+      setAiReply("请输入一句今天的场景/偏好（例如：外食火锅、加班晚饭、不吃辣）。");
+      return;
+    }
+
+    // 先给即时反馈，避免用户感觉“无反应”
+    setAiIsLoading(true);
+    setAiReply(`已收到：${q}，正在生成建议…`);
     setAiInput("");
+
+    const finalReply =
+      aiReplyMap[q] ??
+      (/聚餐|外食|应酬|火锅/.test(q)
+        ? "已按“外食/聚餐”思路做清淡化调整：少酱少盐、主食减量 1/4。"
+        : /加班|晚餐|晚饭|夜宵|晚上/.test(q)
+          ? "已按“晚餐简化”调整：一汤一菜一蛋白，油盐低档控制。"
+          : /不吃辣|不辣|少辣|辣/.test(q)
+            ? "已做“少辣/不辣”替换：保留低盐少油结构，口味更温和。"
+            : /不吃鱼|鱼|海鲜|虾|蟹/.test(q)
+              ? "已按“鱼/海鲜不适”优先替换：选择更易控盐控油的蛋白与蔬菜。"
+              : "已按你的描述做更易执行的低盐少油微调：如需再换菜，再输入“换一道”。");
+
+    window.setTimeout(() => {
+      setAiReply(finalReply);
+      applyAiPlanTuning(q);
+      setAiIsLoading(false);
+    }, 400);
   };
 
   const updateMeal = (dayIdx: number, mealKey: DishMealType, mode: "replace" | "dislike" | "simple") => {
-    setWeekPlan((prev) =>
-      prev.map((day, idx) => {
-        if (idx !== dayIdx) return day;
+    setWeekPlan((prev) => prev.map((day, idx) => (idx !== dayIdx ? day : mutateMealInDay(day, mealKey, mode))));
+  };
 
-        const meal = day[mealKey];
-        const options = meal.alternatives;
+  const applyAiPlanTuning = (rawQ: string) => {
+    const q = rawQ.trim();
+    const dinnerFishPattern = /鱼|鲈|鳕|带鱼|黄花鱼|三文鱼|鲳鱼|鲫鱼|鳗鱼|鲢鱼|鲤鱼/;
 
-        const selectedDishId =
-          mode === "replace"
-            ? options[0] ?? meal.dishId
-            : mode === "dislike"
-              ? options[1] ?? options[0] ?? meal.dishId
-              : // "更简单"：在现有候选里选择 difficulty 最轻的菜品（来自菜品库）
-                options.find((id) => dishById[id]?.difficulty === "easy") ?? options[0] ?? meal.dishId;
+    setWeekPlan((prev) => {
+      const dayIdx = getTodayPlanIndex(prev);
 
-        // 保留原型的“候选列表旋转”体验：让后续点击更容易逐步试到其他方案。
-        const rotated = options.length > 1 ? [...options.slice(1), options[0]] : options;
+      if (q === "今晚不想吃鱼，能换什么") {
+        const day = prev[dayIdx];
+        const dish = dishById[day.dinner.dishId];
+        const mode = dish && dinnerFishPattern.test(dish.dishName) ? "dislike" : "replace";
+        return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "dinner", mode)));
+      }
 
-        return {
-          ...day,
-          [mealKey]: { ...meal, dishId: selectedDishId, alternatives: rotated },
-        };
-      })
-    );
+      if (q === "今天加班，晚餐怎么简化") {
+        return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "dinner", "simple")));
+      }
+
+      if (q === "今天外出聚餐，怎么控制盐油") {
+        return prev.map((d, i) => {
+          if (i !== dayIdx) return d;
+          let nextDay = mutateMealInDay(d, "lunch", "replace");
+          nextDay = mutateMealInDay(nextDay, "dinner", "simple");
+          return nextDay;
+        });
+      }
+
+      if (q === "我不吃辣，能不能换一道") {
+        return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "lunch", "replace")));
+      }
+
+      if (/聚餐|外食|应酬/.test(q)) {
+        return prev.map((d, i) => {
+          if (i !== dayIdx) return d;
+          let nextDay = mutateMealInDay(d, "lunch", "replace");
+          nextDay = mutateMealInDay(nextDay, "dinner", "simple");
+          return nextDay;
+        });
+      }
+
+      if (/加班|晚餐|晚饭|夜宵|晚上/.test(q)) {
+        return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "dinner", "simple")));
+      }
+
+      if (/鱼|海鲜|河鲜/.test(q)) {
+        const day = prev[dayIdx];
+        const dish = dishById[day.dinner.dishId];
+        const mode = dish && dinnerFishPattern.test(dish.dishName) ? "dislike" : "replace";
+        return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "dinner", mode)));
+      }
+
+      if (/辣|花椒|川菜/.test(q)) {
+        return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "lunch", "replace")));
+      }
+
+      return prev.map((d, i) => (i !== dayIdx ? d : mutateMealInDay(d, "dinner", "replace")));
+    });
   };
 
   const mealCardIsWeekend = (dayLabel: string) => dayLabel === "周六" || dayLabel === "周日";
@@ -877,12 +967,10 @@ function App() {
       isThinking={isThinking}
       canOpenPlan={canOpenPlan}
       currentFocus={currentFocus}
-      setActiveNav={(v) => setActiveNav(v)}
-      aiReply={aiReply}
-      aiInput={aiInput}
-      setAiInput={setAiInput}
-      askAi={askAi}
-      quickQuestions={quickQuestions}
+      focusChronic={focusChronic}
+      onGoNutritionPlan={() => setActiveNav("nutrition")}
+      onGoKnowledge={() => setActiveNav("knowledge")}
+      onOpenProfileEditor={() => setShowProfileEditor(true)}
     />
   );
 
@@ -892,6 +980,13 @@ function App() {
         <section className="rounded-2xl border border-warm-border/75 bg-warm-card p-6 shadow-soft">
           <h3 className="text-xl font-semibold">本周饮食计划</h3>
           <p className="mt-1 text-sm text-warm-text/75">围绕{activeProfile.chronicType}饮食重点生成</p>
+        </section>
+
+        <section className="rounded-2xl border border-leaf-300/45 bg-leaf-300/10 p-4 shadow-soft">
+          <p className="text-xs tracking-wide text-warm-text/60">今日提醒</p>
+          <p className="mt-1 text-sm text-warm-text/85">
+            今日关注：{currentFocus.points[2] ?? "按档案重点执行，晚餐尽量清淡、不过量。"}
+          </p>
         </section>
 
         <div className="grid gap-3">
@@ -951,11 +1046,37 @@ function App() {
       </div>
 
       <aside className="h-fit rounded-2xl border border-warm-border/75 bg-warm-card p-4 shadow-soft">
-        <p className="text-sm font-semibold">AI 饮食微调</p>
+        <p className="text-sm font-semibold">今日饮食微调</p>
+        <p className="mt-1 text-xs text-warm-text/65">点选场景或输入说明后，会同步调整<strong className="font-medium text-warm-text/75"> 今日 </strong>对应餐次。</p>
         <div className="mt-3 grid gap-2">
-          {quickQuestions.map((q) => <button key={q} onClick={() => askAi(q)} className="rounded-xl border border-warm-border bg-white px-3 py-2 text-left text-xs">{q}</button>)}
+          {quickQuestions.map((q) => (
+            <button key={q} type="button" onClick={() => askAi(q)} className="rounded-xl border border-warm-border bg-white px-3 py-2 text-left text-xs">
+              {q}
+            </button>
+          ))}
         </div>
         <div className="mt-3 rounded-xl border border-leaf-300/70 bg-leaf-300/20 p-3 text-xs text-warm-text/85">{aiReply}</div>
+        <div className="mt-3 flex gap-2">
+          <input
+            value={aiInput}
+            onChange={(e) => setAiInput(e.target.value)}
+            placeholder="描述今天怎么吃（如：外食火锅）"
+            className="w-full min-w-0 rounded-full border border-warm-border bg-white px-3 py-2 text-xs"
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) askAi(aiInput);
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => askAi(aiInput)}
+            disabled={aiIsLoading}
+            className={`shrink-0 rounded-full bg-warm-text px-3 py-2 text-xs text-white transition ${
+              aiIsLoading ? "cursor-not-allowed opacity-60" : "hover:opacity-90"
+            }`}
+          >
+            发送
+          </button>
+        </div>
       </aside>
 
       {recipeDetail ? (() => {
@@ -1062,7 +1183,7 @@ function App() {
     }
     return (
       <section className="space-y-4">
-        <h2 className="text-2xl font-semibold">慢病饮食资讯</h2>
+        <h2 className="text-2xl font-semibold">饮食资讯</h2>
         <div className="grid gap-4 md:grid-cols-2">
           {newsItems.map((n) => (
             <article key={n.id} onClick={() => setSelectedNewsId(n.id)} className="cursor-pointer rounded-2xl border border-warm-border/75 bg-warm-card p-4 shadow-soft transition hover:-translate-y-0.5">
@@ -1242,6 +1363,28 @@ function App() {
     </section>
   );
 
+  const renderContact = () => (
+    <section className="rounded-2xl border border-warm-border/75 bg-warm-card p-8 shadow-soft">
+      <h2 className="text-2xl font-semibold">联系我们</h2>
+      <p className="mt-2 text-sm text-warm-text/70">如有合作、反馈或产品建议，欢迎通过以下方式联系。</p>
+
+      <div className="mt-8 grid gap-6 sm:max-w-md">
+        <div className="rounded-xl border border-warm-border/70 bg-white p-5">
+          <p className="text-xs tracking-wide text-warm-text/55">电话</p>
+          <a href="tel:+8613460375011" className="mt-2 block text-base font-medium text-warm-text underline-offset-4 hover:underline">
+            +86 13460375011
+          </a>
+        </div>
+        <div className="rounded-xl border border-warm-border/70 bg-white p-5">
+          <p className="text-xs tracking-wide text-warm-text/55">邮箱</p>
+          <a href="mailto:13460375011@163.com" className="mt-2 block text-base font-medium text-warm-text underline-offset-4 hover:underline">
+            13460375011@163.com
+          </a>
+        </div>
+      </div>
+    </section>
+  );
+
   const renderMain = () => {
     switch (activeNav) {
       case "home":
@@ -1252,8 +1395,8 @@ function App() {
         return renderNews();
       case "knowledge":
         return renderKnowledge();
-      case "settings":
-        return renderSimple("设置", ["界面语言：中文", "本地档案：最多 5 个", "饮食计划：每日可微调"]);
+      case "contact":
+        return renderContact();
       case "profile":
         return renderSimple("档案入口", ["请在首页饮食档案区进行编辑与保存。"]);
       default:
@@ -1264,19 +1407,29 @@ function App() {
   return (
     <div className="min-h-screen bg-gradient-to-b from-warm-bg to-white text-warm-text">
       <header className="sticky top-0 z-10 border-b border-warm-border/60 bg-warm-bg/90 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-warm-border bg-white"><BrandMark size={20} /></div>
-            <p className="text-base font-semibold tracking-wide">番茄健康管家</p>
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-4">
+          <div className="flex min-w-0 shrink-0 items-center gap-3">
+            <div className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-warm-border bg-white"><BrandMark size={20} /></div>
+            <p className="truncate text-base font-semibold tracking-wide">番茄健康管家</p>
           </div>
-          <nav className="hidden md:flex items-center gap-2 rounded-full border border-warm-border bg-white/80 px-2 py-1">
-            {navItems.map((item) => (
-              <button key={item.key} onClick={() => setActiveNav(item.key)} className={`rounded-full px-3 py-1.5 text-sm transition ${activeNav === item.key ? "bg-warm-bg text-warm-text" : "text-warm-text/70 hover:bg-warm-bg/70"}`}>
-                {item.label}
-              </button>
-            ))}
+          <nav className="hidden min-w-0 flex-1 justify-center md:flex" aria-label="主导航">
+            <ul className="flex flex-wrap items-center justify-center gap-x-8 gap-y-2 lg:gap-x-10">
+              {navItems.map((item) => (
+                <li key={item.key}>
+                  <button
+                    type="button"
+                    onClick={() => setActiveNav(item.key)}
+                    className={`text-sm font-medium transition ${
+                      activeNav === item.key ? "text-warm-text" : "text-warm-text/55 hover:text-warm-text/85"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
           </nav>
-          <div className="flex items-center gap-2">
+          <div className="flex shrink-0 items-center gap-2">
             <select
               value={activeProfileId}
               onChange={(e) => {
@@ -1287,6 +1440,7 @@ function App() {
                   setGender(next.gender);
                   setAge(next.age);
                   setSelectedChronic(next.chronicType);
+                  setFocusChronic(next.chronicType);
                   setCoreMetricBand(next.coreMetric);
                 }
               }}
@@ -1294,12 +1448,39 @@ function App() {
             >
               {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
             </select>
-            <button onClick={() => setActiveNav("home")} className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-warm-border bg-white" aria-label="编辑档案">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveNav("home");
+                setShowProfileEditor(true);
+              }}
+              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-warm-border bg-white"
+              aria-label="编辑档案"
+            >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                 <path d="M4 20h4l10-10-4-4L4 16v4Z" stroke="#5F7363" strokeWidth="1.6" />
               </svg>
             </button>
           </div>
+        </div>
+        <div className="border-t border-warm-border/50 md:hidden">
+          <nav className="mx-auto max-w-6xl overflow-x-auto px-4 py-2" aria-label="主导航">
+            <ul className="flex w-max items-center gap-x-6">
+              {navItems.map((item) => (
+                <li key={`m-${item.key}`} className="shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setActiveNav(item.key)}
+                    className={`whitespace-nowrap text-sm font-medium transition ${
+                      activeNav === item.key ? "text-warm-text" : "text-warm-text/55"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
         </div>
       </header>
 

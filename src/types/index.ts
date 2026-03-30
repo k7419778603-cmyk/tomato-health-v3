@@ -1,4 +1,4 @@
-export type NavKey = "home" | "nutrition" | "news" | "knowledge" | "settings" | "profile";
+export type NavKey = "home" | "nutrition" | "news" | "knowledge" | "contact" | "profile";
 export type ChronicType =
   | "高血压"
   | "高血糖 / 糖尿病风险"
